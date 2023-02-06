@@ -1,4 +1,4 @@
-# PGR-tk: A PanGenomic Research Took Kit
+# PGR-tk: A PanGenomic Research Tool Kit
 
 [![test_and_build](https://github.com/Sema4-Research/pgr-tk/actions/workflows/test_and_build.yml/badge.svg)](https://github.com/cschin/Sema4-Research/actions/workflows/test_and_build.yml)
 
