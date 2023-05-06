@@ -1,6 +1,5 @@
 const VERSION_STRING: &str = env!("VERSION_STRING");
 use clap::{self, CommandFactory, Parser};
-use kodama::{linkage, Method};
 use rustc_hash::FxHashMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -16,6 +15,12 @@ struct CmdOptions {
     bed_file_path: String,
     /// the prefix of the output file
     output_prefix: String,
+    /// the path the annotation files
+    #[clap(long)]
+    ctgs_of_interest: Option<String>,
+    /// specify the bundle to anchor on
+    #[clap(long, default_value_t = false)]
+    alt_anchoring_mode: bool,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
@@ -39,7 +44,12 @@ enum AlnType {
 fn align_bundles(
     q_bundles: &Vec<BundleSegement>,
     t_bundles: &Vec<BundleSegement>,
-) -> (f32, usize, usize) {
+) -> (
+    f32,
+    usize,
+    usize,
+    Vec<(usize, usize, AlnType, u32, u32, i64)>,
+) {
     let q_count = q_bundles.len();
     let t_count = t_bundles.len();
     let mut s_map = FxHashMap::<(usize, usize), i64>::default();
@@ -53,12 +63,14 @@ fn align_bundles(
             let min_len = if q_len > t_len { t_len } else { q_len };
             let q_b_seg = q_bundles[q_idx];
             let t_b_seg = t_bundles[t_idx];
-            if q_idx == 0
-                && t_idx == 0
-                && (q_b_seg.bundle_id == t_b_seg.bundle_id)
-                && (q_b_seg.bundle_dir == t_b_seg.bundle_dir)
-            {
-                best = (AlnType::Match, 2 * min_len)
+            if q_idx == 0 && t_idx == 0 {
+                if (q_b_seg.bundle_id == t_b_seg.bundle_id)
+                    && (q_b_seg.bundle_dir == t_b_seg.bundle_dir)
+                {
+                    best = (AlnType::Match, 2 * min_len)
+                } else {
+                    best = (AlnType::Match, 0)
+                }
             };
             if q_idx > 0
                 && t_idx > 0
@@ -71,13 +83,13 @@ fn align_bundles(
                 )
             };
             if t_idx > 0 {
-                let insert_score = -2 * q_len + s_map.get(&(q_idx, t_idx - 1)).unwrap();
+                let insert_score = -q_len + s_map.get(&(q_idx, t_idx - 1)).unwrap();
                 if insert_score > best.1 {
                     best = (AlnType::Insertion, insert_score)
                 };
             };
             if q_idx > 0 {
-                let delete_score = -2 * t_len + s_map.get(&(q_idx - 1, t_idx)).unwrap();
+                let delete_score = -t_len + s_map.get(&(q_idx - 1, t_idx)).unwrap();
                 if delete_score > best.1 {
                     best = (AlnType::Deletion, delete_score)
                 }
@@ -89,7 +101,7 @@ fn align_bundles(
     //let mut best_score = 0;
     //let mut best_q_idx = 0;
     //let mut best_t_idx = 0;
-
+    let mut aln_path = Vec::<_>::new();
     (0..t_count)
         .flat_map(|t_idx| (0..q_count).map(move |q_idx| (q_idx, t_idx)))
         .for_each(|(q_idx, t_idx)| {
@@ -109,8 +121,8 @@ fn align_bundles(
     let mut diff_len = 0_usize;
     let mut max_len = 1_usize;
     while let Some(aln_type) = t_map.get(&(q_idx, t_idx)) {
-        // let qq_idx = q_idx;
-        // let tt_idx = t_idx;
+        let qq_idx = q_idx;
+        let tt_idx = t_idx;
         let (diff_len_delta, max_len_delta) = match aln_type {
             AlnType::Match => {
                 let q_len = (q_bundles[q_idx].end as i64 - q_bundles[q_idx].bgn as i64).abs();
@@ -138,14 +150,23 @@ fn align_bundles(
         };
         diff_len += diff_len_delta;
         max_len += max_len_delta;
-        /*
-        println!(
-            "{} {} {:?} {:?} {:?} {} {}",
-            qq_idx, tt_idx, aln_type, q_bundles[qq_idx].bundle_id, t_bundles[tt_idx].bundle_id, diff_len_delta, max_len_delta
-        );
-            */
+        let score = s_map.get(&(qq_idx, tt_idx)).unwrap_or(&0);
+        aln_path.push((
+            qq_idx,
+            tt_idx,
+            aln_type.clone(),
+            q_bundles[qq_idx].bundle_id,
+            t_bundles[tt_idx].bundle_id,
+            *score,
+        ));
     }
-    (diff_len as f32 / max_len as f32, diff_len, max_len)
+    aln_path.reverse();
+    (
+        diff_len as f32 / max_len as f32,
+        diff_len,
+        max_len,
+        aln_path,
+    )
 }
 
 fn main() -> Result<(), std::io::Error> {
@@ -187,147 +208,128 @@ fn main() -> Result<(), std::io::Error> {
         e.push(b_seg);
     });
 
-    let mut ctg_data = ctg_data
-        .into_iter()
-        .map(|(k, mut v)| {
-            v.sort();
-            (k, v)
-        })
-        .collect::<Vec<_>>();
+    let mut ctg_to_annotation = FxHashMap::<String, String>::default();
+    let ctg_data_vec = if args.ctgs_of_interest.is_some() {
+        let filename = args.ctgs_of_interest.unwrap();
+        let path = path::Path::new(&filename);
+        let ctg_of_interest_file = BufReader::new(File::open(path)?);
+        let ctg_data_vec: Vec<_> = ctg_of_interest_file
+            .lines()
+            .map(|line| {
+                let line = line.unwrap().trim().to_string();
+                if line.is_empty() {
+                    return None;
+                }
+                if &line[0..1] == "#" {
+                    return None;
+                }
+                let mut ctg_annotation = line.split('\t');
+                let ctg = ctg_annotation
+                    .next()
+                    .expect("error parsthe ctgs_of_interest file")
+                    .to_string();
 
-    ctg_data.sort();
-    let n_ctg = ctg_data.len();
+                // println!("{:?} {:?}", line, ctg);
+                let data = ctg_data.get(&ctg).unwrap().to_owned();
+                if let Some(annotation) = ctg_annotation.next() {
+                    ctg_to_annotation.insert(ctg.clone(), annotation.to_string());
+                    //annotations.push( (ctg.clone(), annotation) );
+                    Some((ctg, annotation.to_string(), data))
+                } else {
+                    ctg_to_annotation.insert(ctg.clone(), "".to_string());
 
-    let out_path = Path::new(&args.output_prefix).with_extension("dist");
-    let mut out_file = BufWriter::new(File::create(out_path).expect("can't create the dist file"));
+                    Some((ctg, "".to_string(), data))
+                }
+            })
+            .flatten()
+            .collect();
+        ctg_data_vec
+    } else {
+        let mut ctg_data_vec = ctg_data.iter().map(|(k, v)| (k, v)).collect::<Vec<_>>();
+        ctg_data.keys().into_iter().for_each(|ctg| {
+            ctg_to_annotation.insert(ctg.clone(), ctg.clone());
+        });
+        ctg_data_vec.sort();
+        ctg_data_vec
+            .into_iter()
+            .map(|(ctg, data)| (ctg.clone(), ctg.clone(), data.clone()))
+            .collect()
+    };
 
-    let mut dist_map = FxHashMap::<(usize, usize), f32>::default();
+    let n_ctg = ctg_data_vec.len();
 
-    (0..n_ctg)
-        .flat_map(|ctg_idx0| (0..n_ctg).map(move |ctg_idx1| (ctg_idx0, ctg_idx1)))
-        .for_each(|(ctg_idx0, ctg_idx1)| {
-            if ctg_idx0 > ctg_idx1 {
-                return;
-            };
-            let (ctg0, bundles0) = &ctg_data[ctg_idx0];
-            let (ctg1, bundles1) = &ctg_data[ctg_idx1];
-            let (dist0, diff_len0, max_len0) = align_bundles(bundles0, bundles1);
-            let (dist1, diff_len1, max_len1) = align_bundles(bundles1, bundles0);
-            let (dist, diff_len, max_len) = if dist0 > dist1 {
-                (dist0, diff_len0, max_len0)
+    let out_path = Path::new(&args.output_prefix).with_extension("offset");
+    let mut out_file =
+        BufWriter::new(File::create(out_path).expect("can't create the bundle offset file"));
+
+    let (ctg1, _anootation, bundles1) = &ctg_data_vec[0];
+    let _ = writeln!(out_file, "{}\t{}", ctg1, 0);
+    (1..n_ctg).for_each(|ctg_idx| {
+        let (ctg0, _annotation, bundles0) = &ctg_data_vec[ctg_idx];
+        let (_dist0, _diff_len0, _max_len0, alns) = align_bundles(bundles0, bundles1);
+        let mut best_anchor_point = None;
+        let mut best_single_match_anchor_point = None;
+
+        let mut score = 0_i64;
+        let mut last_global_score = 0_i64;
+        let mut current_score = 0_i64;
+        let mut best_score = 0_i64;
+        let mut best_single_bundle_score = 0_i64;
+        alns.into_iter().for_each(
+            |(qq_idx, tt_idx, _aln_type, _q_bid, _t_bid, global_score)| {
+                score = global_score - last_global_score;
+                if score > best_single_bundle_score {
+                    best_single_bundle_score = score;
+                    best_single_match_anchor_point = Some((qq_idx, tt_idx));
+                };
+                current_score += score;
+                if current_score < 0 {
+                    current_score = 0;
+                }
+                if current_score > best_score {
+                    best_score = current_score;
+                    best_anchor_point = Some((qq_idx, tt_idx));
+                }
+                /*
+                println!(
+                    "{} {} {} {} {:?} {:?} {:?} {} {}",
+                    ctg0, ctg1, qq_idx, tt_idx, aln_type, q_bid, t_bid, global_score, current_score
+                );
+                */
+                last_global_score = global_score;
+            },
+        );
+
+        let b0 = if args.alt_anchoring_mode {
+            if let Some(anchor_point) = best_single_match_anchor_point {
+                bundles0[anchor_point.0].bgn
             } else {
-                (dist1, diff_len1, max_len1)
-            };
-            writeln!(
-                out_file,
-                "{} {} {} {} {}",
-                ctg0, ctg1, dist, diff_len, max_len
-            )
-            .expect("writing error");
-            if ctg_idx1 != ctg_idx0 {
-                writeln!(
-                    out_file,
-                    "{} {} {} {} {}",
-                    ctg1, ctg0, dist, diff_len, max_len
-                )
-                .expect("writing error");
-                dist_map.insert((ctg_idx0, ctg_idx1), dist);
+                0
             }
-        });
-
-    let mut dist_mat = vec![];
-    (0..n_ctg - 1).for_each(|i| {
-        (i + 1..n_ctg).for_each(|j| {
-            dist_mat.push(*dist_map.get(&(i, j)).unwrap());
-        })
-    });
-    let dend = linkage(&mut dist_mat, n_ctg, Method::Average);
-
-    let steps = dend.steps().to_vec();
-    let mut node_data = FxHashMap::<usize, (String, Vec<usize>, f32)>::default();
-    (0..n_ctg).for_each(|ctg_idx| {
-        node_data.insert(ctg_idx, (format!("{}", ctg_idx), vec![ctg_idx], 0.0_f32));
-    });
-
-    let mut last_node_id = 0_usize;
-    steps.iter().enumerate().for_each(|(c, s)| {
-        let (node_string1, nodes1, height1) = node_data.remove(&s.cluster1).unwrap();
-        let (node_string2, nodes2, height2) = node_data.remove(&s.cluster2).unwrap();
-        let new_node_id = c + n_ctg;
-        let mut nodes = Vec::<usize>::new();
-        let new_node_string = if nodes1.len() > nodes2.len() {
-            nodes.extend(nodes1);
-            nodes.extend(nodes2);
-            format!(
-                "({}:{}, {}:{})",
-                node_string1,
-                s.dissimilarity - height1,
-                node_string2,
-                s.dissimilarity - height2
-            )
         } else {
-            nodes.extend(nodes2);
-            nodes.extend(nodes1);
-            format!(
-                "({}:{}, {}:{})",
-                node_string2,
-                s.dissimilarity - height2,
-                node_string1,
-                s.dissimilarity - height1
-            )
+            if let Some(anchor_point) = best_anchor_point {
+                bundles0[anchor_point.0].bgn
+            } else {
+                0
+            }
         };
-        node_data.insert(new_node_id, (new_node_string, nodes, s.dissimilarity));
-        last_node_id = new_node_id;
+        let b1 = if args.alt_anchoring_mode {
+            if let Some(anchor_point) = best_single_match_anchor_point {
+                bundles1[anchor_point.1].bgn
+            } else {
+                0
+            }
+        } else {
+            if let Some(anchor_point) = best_anchor_point {
+                bundles1[anchor_point.1].bgn
+            } else {
+                0
+            }
+        };
+        let offset = b1 as i64 - b0 as i64;
+        //println!("XXX {} {} {} {:?} {:?}", best_score, best_anchor_point.0, best_anchor_point.1, bundles0[best_anchor_point.0], bundles1[best_anchor_point.1]);
+        let _ = writeln!(out_file, "{}\t{}", ctg0, offset);
     });
 
-    let mut tree_file = BufWriter::new(
-        File::create(Path::new(&args.output_prefix).with_extension("nwk"))
-            .expect("can't create the nwk file"),
-    );
-
-    let emptyp_string = ("".to_string(), vec![], 0.0);
-    let (tree_string, nodes, _) = node_data.get(&last_node_id).unwrap_or(&emptyp_string);
-    writeln!(tree_file, "{};", tree_string).expect("can't write the nwk file");
-
-    let mut dendrogram_file = BufWriter::new(
-        File::create(Path::new(&args.output_prefix).with_extension("ddg"))
-            .expect("can't create the dendrogram file"),
-    );
-    let mut node_position_size = FxHashMap::<usize, ((f32, f32), usize)>::default();
-    let mut position = 0.0_f32;
-    nodes.iter().for_each(|&ctg_idx| {
-        node_position_size.insert(ctg_idx, ((position, 0.0), 1));
-        writeln!(dendrogram_file, "L\t{}\t{}", ctg_idx, ctg_data[ctg_idx].0)
-            .expect("can't write the dendrogram file");
-        position += 1.0;
-    });
-    steps.into_iter().enumerate().for_each(|(c, s)| {
-        let ((pos0, _), size0) = *node_position_size.get(&s.cluster1).unwrap();
-        let ((pos1, _), size1) = *node_position_size.get(&s.cluster2).unwrap();
-
-        let pos = ((size0 as f32) * pos0 + (size1 as f32) * pos1) / ((size0 + size1) as f32);
-        writeln!(
-            dendrogram_file,
-            "I\t{}\t{}\t{}\t{}\t{}",
-            c + n_ctg,
-            s.cluster1,
-            s.cluster2,
-            s.size,
-            s.dissimilarity,
-        )
-        .expect("can't write the dendrogram file");
-        node_position_size.insert(c + n_ctg, ((pos, s.dissimilarity), s.size));
-    });
-    let mut node_positions = node_position_size
-        .into_iter()
-        .collect::<Vec<(usize, ((f32, f32), usize))>>();
-    node_positions.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-    node_positions
-        .into_iter()
-        .for_each(|(vid, ((pos, h), size))| {
-            writeln!(dendrogram_file, "P\t{}\t{}\t{}\t{}", vid, pos, h, size)
-                .expect("can't write the dendrogram file");
-        });
     Ok(())
 }

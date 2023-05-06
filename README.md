@@ -1,6 +1,6 @@
 # PGR-tk: A PanGenomic Research Tool Kit
 
-[![test_and_build](https://github.com/Sema4-Research/pgr-tk/actions/workflows/test_and_build.yml/badge.svg)](https://github.com/cschin/Sema4-Research/actions/workflows/test_and_build.yml)
+[![test_and_build](https://github.com/genedx/pgr-tk/actions/workflows/test_and_build.yml/badge.svg)](https://github.com/cschin/genedx/actions/workflows/test_and_build.yml)
 
 This repository is a project to provide Python and Rust libraries to facilitate pangenomics analysis. Several algorithms and data structures used for the Peregrine Genome Assembler are useful for Pangenomics analysis as well. This repo takes those algorithms and data structure, combining other handy 3rd party tools to expose them as a library in Python (with Rust code for those computing parts that need performance.) 
 
@@ -21,13 +21,32 @@ With the MAP graph, we can use the "principal bundle decomposition" to study com
 
 ## Documentation, Usage and Examples
 
-The API documentation is at https://sema4-research.github.io/pgr-tk/
+Command Line Tools:
 
-A collection of Jupyter Notebooks are at https://github.com/sema4-Research/pgr-tk-notebooks/
+PGR-TK provides the following tool to 
+
+- create the PGR-TK sequence and index database
+	-  `pgr-mdb`: create pgr minimizer database with AGC backend
+	-  `pgr-make-frgdb`: create PGR-TK fragment minimizer database with frg format backend
+- query the database to fetch sequences
+	- `pgr-query`: query a PGR-TK pangenome sequence database, ouput the hit summary and generate fasta files from the target sequences
+- generate MAP-graph in GFA format and principal bundle decomposition bed file
+	- `pgr-pbundle-decomp`: generat the principal bundle decomposition though MAP Graph from a fasta file
+- generate SVG from the principal bundle decomposition bed file
+	- `pgr-pbundle-bed2svg`: generate SVG from a principal bundle bed file
+- auxiliary tools
+	- `pgr-pbundle-bed2sorted`: generate annotation file with a sorting order from the principal bundle decomposition
+	- `pgr-pbundle-bed2dist`: generate alignment scores between sequences using bundle decomposition from a principal bundle bed file
+
+For each comannd, `command --help` provides the detail usage information. 
+
+The API documentation is at https://genedx.github.io/pgr-tk/
+
+A collection of Jupyter Notebooks are at https://github.com/genedx/pgr-tk-notebooks/
 
 ## Built Binaries
 
-Check https://github.com/Sema4-Research/pgr-tk/releases
+Check https://github.com/genedx/pgr-tk/releases
 
 
 ## Build
